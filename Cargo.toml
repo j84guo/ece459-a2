@@ -1,0 +1,21 @@
+[package]
+name = "lab2"
+version = "0.1.0"
+authors = ["YuhanLiin <linyuhan0315@hotmail.com>", "Bernie Roehl <broehl@uwaterloo.ca"]
+edition = "2018"
+
+[dependencies]
+hmac = "0.8.1"
+sha2 = "0.9.1"
+base64 = "0.12.3"
+
+crossbeam = "0.7.3"
+num_cpus = "1.13.0"
+
+[[bin]]
+name = "message-passing"
+path = "src/message-passing.rs"
+
+[[bin]]
+name = "shared-mem"
+path = "src/shared-mem.rs"
