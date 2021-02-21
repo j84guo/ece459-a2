@@ -3,9 +3,16 @@
 // YOU SHOULD MODIFY THIS FILE TO USE THREADING AND SHARED MEMORY
 
 #![warn(clippy::all)]
+use futures::executor::block_on;
 use hmac::{Hmac, Mac, NewMac};
 use sha2::Sha256;
+use tokio::sync::Semaphore;
 use std::env;
+use std::clone::Clone;
+use std::thread;
+use std::sync::{Arc, Mutex};
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 const DEFAULT_ALPHABETS: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
 
@@ -18,37 +25,61 @@ fn is_secret_valid(msg: &[u8], sig: &[u8], secret: &[u8]) -> bool {
     mac.verify(sig).is_ok()
 }
 
-// Contextual info for solving a JWT
-struct JwtSolver {
-    alphabet: Vec<u8>, // set of possible bytes in the secret
-    max_len: usize,    // max length of the secret
-    msg: Vec<u8>,      // JWT message
-    sig64: Vec<u8>,    // JWT signature (base64 decoded)
+#[derive(Clone)]
+struct SharedBuffer {
+    buffer: Arc<Mutex<VecDeque<Option<Vec<u8>>>>>,
+    items: Arc<Semaphore>,
+    spaces: Arc<Semaphore>
 }
 
-impl JwtSolver {
-    // Recursively check every possible secret string,
-    // returning the correct secret if it exists
-    fn check_all(&self, secret: Vec<u8>) -> Option<Vec<u8>> {
-        if is_secret_valid(&self.msg, &self.sig64, &secret) {
-            return Some(secret);  // found it!
-        }
+impl SharedBuffer {
+    fn new(capacity: usize) -> SharedBuffer {
+        return SharedBuffer {
+            buffer: Arc::new(Mutex::new(VecDeque::<Option<Vec<u8>>>::with_capacity(capacity))),
+            items: Arc::new(Semaphore::new(0)),
+            spaces: Arc::new(Semaphore::new(capacity))
+        };
+    }
 
-        if secret.len() == self.max_len {
-            return None;  // no secret of length <= max_len
+    fn push(&self, x: Option<Vec<u8>>) {
+        let permit = block_on(self.spaces.acquire());
+        {
+            let mut buffer = self.buffer.lock().unwrap();
+            buffer.push_back(x);
         }
+        self.items.add_permits(1);
+        permit.forget();
+    }
 
-        for &c in self.alphabet.iter() {
-            // allocate space for a secret one character longer  
-            let mut new_secret = Vec::with_capacity(secret.len() + 1);
-            // build the new secret
-            new_secret.extend(secret.iter().chain(&mut [c].iter()));
-            // check this secret, and recursively check longer ones
-            if let Some(ans) = self.check_all(new_secret) {
-                return Some(ans);
-            }
-        }
-        None
+    fn pop(&self) -> Option<Vec<u8>> {
+        let permit = block_on(self.items.acquire());
+        let x = {
+            let mut buffer = self.buffer.lock().unwrap();
+            buffer.pop_front().unwrap()
+        };
+        self.spaces.add_permits(1);
+        permit.forget();
+        return x;
+    }
+}
+
+fn generate_secrets(sec: Vec<u8>,
+                    alphabet: &[u8],
+                    max_len: usize,
+                    buffer: &SharedBuffer,
+                    done_flag: &Arc<AtomicBool>) {
+    if done_flag.load(Ordering::SeqCst) {
+        return;
+    }
+    buffer.push(Some(sec.clone()));
+    if sec.len() == max_len {
+        return;
+    }
+    for &c in alphabet {
+        let mut next_sec: Vec<u8> = Vec::with_capacity(sec.len() + 1);
+        next_sec.extend(sec.iter());
+        next_sec.push(c);
+        generate_secrets(next_sec, alphabet, max_len, buffer, done_flag);
     }
 }
 
@@ -69,7 +100,7 @@ fn main() {
         }
     };
 
-    let alphabet = args
+    let alphabet: Vec<u8> = args
         .get(3)
         .map(|a| a.as_bytes())
         .unwrap_or(DEFAULT_ALPHABETS)
@@ -90,7 +121,7 @@ fn main() {
     let sig = &token.as_bytes()[dot + 1..];
 
     // convert base64 encoding into binary
-    let sig64 = match base64::decode_config(sig, base64::URL_SAFE_NO_PAD) {
+    let sig = match base64::decode_config(sig, base64::URL_SAFE_NO_PAD) {
         Ok(sig) => sig,
         Err(_) => {
             eprintln!("Invalid signature");
@@ -98,19 +129,38 @@ fn main() {
         }
     };
 
-    // build the solver and run it to get the answer
-    let solver = JwtSolver {
-        alphabet,
-        max_len: max_len as usize,
-        msg,
-        sig64,
-    };
-    let ans = solver.check_all(b"".to_vec());
+    let num_workers = num_cpus::get();
+    let buffer_capacity = num_workers * 8;
+    let buffer = SharedBuffer::new(buffer_capacity);
+    let done_flag = Arc::new(AtomicBool::new(false));
 
-    match ans {
-        Some(ans) => println!(
-            "{}", std::str::from_utf8(&ans).expect("answer not a valid string")
-        ),
-        None => println!("No answer found"),
-    };
+    let mut workers = vec![];
+    for _ in 0..num_workers {
+        let msg = msg.clone();
+        let sig = sig.clone();
+        let buffer = buffer.clone();
+        let done_flag = done_flag.clone();
+        workers.push(thread::spawn(move || {
+            loop {
+                let sec = match buffer.pop() {
+                    Some(sec) => sec,
+                    None => return
+                };
+                if is_secret_valid(&msg, &sig, &sec) {
+                    println!("{}", std::str::from_utf8(&sec).unwrap());
+                    done_flag.store(true, Ordering::SeqCst);
+                    return;
+                }
+            }
+        }));
+    }
+
+    generate_secrets(Vec::<u8>::new(), &alphabet, max_len as usize, &buffer, &done_flag);
+
+    for _ in 0..num_workers {
+        buffer.push(None);
+    }
+    for w in workers {
+        w.join().unwrap();
+    }
 }

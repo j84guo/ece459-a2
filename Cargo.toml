@@ -5,12 +5,13 @@ authors = ["YuhanLiin <linyuhan0315@hotmail.com>", "Bernie Roehl <broehl@uwaterl
 edition = "2018"
 
 [dependencies]
-hmac = "0.8.1"
-sha2 = "0.9.1"
 base64 = "0.12.3"
-
 crossbeam = "0.7.3"
+futures = "0.3.6"
+hmac = "0.8.1"
 num_cpus = "1.13.0"
+sha2 = "0.9.1"
+tokio = { version = "0.2.22", features = ["sync"] }
 
 [[bin]]
 name = "message-passing"

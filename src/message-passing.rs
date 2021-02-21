@@ -3,53 +3,71 @@
 // YOU SHOULD MODIFY THIS FILE TO USE THEADING AND MESSAGE-PASSING
 
 #![warn(clippy::all)]
+use crossbeam::channel::{bounded, Receiver, Sender};
 use hmac::{Hmac, Mac, NewMac};
 use sha2::Sha256;
 use std::env;
+use std::thread;
+use std::thread::JoinHandle;
 
 const DEFAULT_ALPHABETS: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
 
 type HmacSha256 = Hmac<Sha256>;
 
 // Check if a JWT secret is correct
-fn is_secret_valid(msg: &[u8], sig: &[u8], secret: &[u8]) -> bool {
+fn is_secret_valid(msg: &[u8],
+                   sig: &[u8],
+                   secret: &[u8]) -> bool {
     let mut mac = HmacSha256::new_varkey(secret).unwrap();
     mac.update(msg);
     mac.verify(sig).is_ok()
 }
 
-// Contextual info for solving a JWT
-struct JwtSolver {
-    alphabet: Vec<u8>, // set of possible bytes in the secret
-    max_len: usize,    // max length of the secret
-    msg: Vec<u8>,      // JWT message
-    sig64: Vec<u8>,    // JWT signature (base64 decoded)
+fn generate_secrets(sec: Vec<u8>,
+                    alphabet: &[u8],
+                    max_len: usize,
+                    sec_send_end: &Sender<Option<Vec<u8>>>,
+                    res_recv_end: &Receiver<Vec<u8>>) {
+    if !res_recv_end.is_empty() {
+        return;
+    }
+    sec_send_end.send(Some(sec.clone())).unwrap();
+    if sec.len() == max_len {
+        return;
+    }
+    for &c in alphabet {
+        let mut next_sec: Vec<u8> = Vec::with_capacity(sec.len() + 1);
+        next_sec.extend(sec.iter());
+        next_sec.push(c);
+        generate_secrets(next_sec, alphabet, max_len, sec_send_end, res_recv_end);
+    }
 }
 
-impl JwtSolver {
-    // Recursively check every possible secret string,
-    // returning the correct secret if it exists
-    fn check_all(&self, secret: Vec<u8>) -> Option<Vec<u8>> {
-        if is_secret_valid(&self.msg, &self.sig64, &secret) {
-            return Some(secret);  // found it!
-        }
-
-        if secret.len() == self.max_len {
-            return None;  // no secret of length <= max_len
-        }
-
-        for &c in self.alphabet.iter() {
-            // allocate space for a secret one character longer  
-            let mut new_secret = Vec::with_capacity(secret.len() + 1);
-            // build the new secret
-            new_secret.extend(secret.iter().chain(&mut [c].iter()));
-            // check this secret, and recursively check longer ones
-            if let Some(ans) = self.check_all(new_secret) {
-                return Some(ans);
+fn start_consumers(num_workers: usize,
+                   msg: &Vec<u8>,
+                   sig: &Vec<u8>,
+                   sec_recv_end: &Receiver<Option<Vec<u8>>>,
+                   res_send_end: &Sender<Vec<u8>>) -> Vec<JoinHandle<()>> {
+    let mut workers = vec![];
+    for _ in 0..num_workers {
+        let msg = msg.clone();
+        let sig = sig.clone();
+        let sec_recv_end = sec_recv_end.clone();
+        let res_send_end = res_send_end.clone();
+        workers.push(thread::spawn(move || {
+            loop {
+                let sec = match sec_recv_end.recv().unwrap() {
+                    Some(sec) => sec,
+                    None => return
+                };
+                if is_secret_valid(&msg, &sig, &sec) {
+                    res_send_end.try_send(sec).unwrap();
+                    return;
+                }
             }
-        }
-        None
+        }));
     }
+    return workers;
 }
 
 fn main() {
@@ -69,7 +87,7 @@ fn main() {
         }
     };
 
-    let alphabet = args
+    let alphabet: Vec<u8> = args
         .get(3)
         .map(|a| a.as_bytes())
         .unwrap_or(DEFAULT_ALPHABETS)
@@ -90,7 +108,7 @@ fn main() {
     let sig = &token.as_bytes()[dot + 1..];
 
     // convert base64 encoding into binary
-    let sig64 = match base64::decode_config(sig, base64::URL_SAFE_NO_PAD) {
+    let sig = match base64::decode_config(sig, base64::URL_SAFE_NO_PAD) {
         Ok(sig) => sig,
         Err(_) => {
             eprintln!("Invalid signature");
@@ -98,19 +116,25 @@ fn main() {
         }
     };
 
-    // build the solver and run it to get the answer
-    let solver = JwtSolver {
-        alphabet,
-        max_len: max_len as usize,
-        msg,
-        sig64,
-    };
-    let ans = solver.check_all(b"".to_vec());
+    let num_workers = num_cpus::get();
+    let buffer_capacity = num_workers * 8;
+    let (sec_send_end, sec_recv_end) = bounded::<Option<Vec<u8>>>(buffer_capacity);
+    let (res_send_end, res_recv_end) = bounded::<Vec<u8>>(1usize);
 
-    match ans {
-        Some(ans) => println!(
-            "{}", std::str::from_utf8(&ans).expect("answer not a valid string")
-        ),
-        None => println!("No answer found"),
-    };
+    let workers = start_consumers(num_workers, &msg, &sig, &sec_recv_end, &res_send_end);
+    generate_secrets(Vec::<u8>::new(), &alphabet, max_len as usize, &sec_send_end, &res_recv_end);
+
+    for _ in 0..num_workers {
+        sec_send_end.send(None).unwrap();
+    }
+    for w in workers {
+        w.join().unwrap();
+    }
+
+    if res_recv_end.is_empty() {
+        println!("No answer found");
+    } else {
+        let ans = res_recv_end.recv().unwrap();
+        println!("{}", std::str::from_utf8(&ans).unwrap());
+    }
 }
