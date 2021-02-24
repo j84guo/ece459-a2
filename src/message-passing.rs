@@ -71,14 +71,13 @@ fn start_consumers(num_workers: usize,
 }
 
 fn main() {
-    let args = env::args().collect::<Vec<_>>();
+    let args: Vec<String> = env::args().collect();
     if args.len() < 3 {
         eprintln!("Usage: <token> <max_len> [alphabet]");
         return;
     }
 
     let token = &args[1];
-
     let max_len = match args[2].parse::<u32>() {
         Ok(len) => len,
         Err(_) => {
@@ -86,7 +85,6 @@ fn main() {
             return;
         }
     };
-
     let alphabet: Vec<u8> = args
         .get(3)
         .map(|a| a.as_bytes())
@@ -101,12 +99,10 @@ fn main() {
             return;
         }
     };
-
     // message is everything before the last dot
     let msg = token.as_bytes()[..dot].to_vec();
     // signature is everything after the last dot
     let sig = &token.as_bytes()[dot + 1..];
-
     // convert base64 encoding into binary
     let sig = match base64::decode_config(sig, base64::URL_SAFE_NO_PAD) {
         Ok(sig) => sig,
@@ -116,21 +112,29 @@ fn main() {
         }
     };
 
+    // Start one worker for each virtual cpu
     let num_workers = num_cpus::get();
-    let buffer_capacity = num_workers * 8;
+    // Let buffer capacity be a multiple of number of workers
+    let buffer_capacity = num_workers * 4;
+    // Channel for sending secrets from the main thread to workers
     let (sec_send_end, sec_recv_end) = bounded::<Option<Vec<u8>>>(buffer_capacity);
+    // Channel for a worker to signal that it has found the answer
     let (res_send_end, res_recv_end) = bounded::<Vec<u8>>(1usize);
 
+    // Start workers
     let workers = start_consumers(num_workers, &msg, &sig, &sec_recv_end, &res_send_end);
+    // Generate secrets until all secrets are sent or a worker indicates it has found the answer
     generate_secrets(Vec::<u8>::new(), &alphabet, max_len as usize, &sec_send_end, &res_recv_end);
 
+    // Either way, tell all workers to stop
     for _ in 0..num_workers {
         sec_send_end.send(None).unwrap();
     }
+    // Wait for workers to finish
     for w in workers {
         w.join().unwrap();
     }
-
+    // Check for answer
     if res_recv_end.is_empty() {
         println!("No answer found");
     } else {

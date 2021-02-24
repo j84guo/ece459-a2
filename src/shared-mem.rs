@@ -91,7 +91,6 @@ fn main() {
     }
 
     let token = &args[1];
-
     let max_len = match args[2].parse::<u32>() {
         Ok(len) => len,
         Err(_) => {
@@ -99,7 +98,6 @@ fn main() {
             return;
         }
     };
-
     let alphabet: Vec<u8> = args
         .get(3)
         .map(|a| a.as_bytes())
@@ -114,12 +112,10 @@ fn main() {
             return;
         }
     };
-
     // message is everything before the last dot
     let msg = token.as_bytes()[..dot].to_vec();
     // signature is everything after the last dot
     let sig = &token.as_bytes()[dot + 1..];
-
     // convert base64 encoding into binary
     let sig = match base64::decode_config(sig, base64::URL_SAFE_NO_PAD) {
         Ok(sig) => sig,
