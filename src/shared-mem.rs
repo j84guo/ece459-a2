@@ -83,7 +83,7 @@ impl SharedBuffer {
 
 fn generate_secrets(alphabet: &[u8],
                     max_len: usize,
-                    buffer: &SharedBuffer,
+                    shared_buffer: &SharedBuffer,
                     is_answer_found: &Arc<AtomicBool>) {
     let mut frontier = vec![Vec::<u8>::new()];
     while frontier.len() > 0 {
@@ -91,7 +91,7 @@ fn generate_secrets(alphabet: &[u8],
         if is_answer_found.load(Ordering::SeqCst) {
             return;
         }
-        buffer.push(Some(secret.clone()));
+        shared_buffer.push(Some(secret.clone()));
         if secret.len() < max_len {
             for c in alphabet {
                 let mut next_sec = secret.clone();
