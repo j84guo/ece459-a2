@@ -112,12 +112,12 @@ fn start_consumers(num_workers: usize,
     for _ in 0..num_workers {
         let message = message.clone();
         let signature = signature.clone();
-        let buffer = shared_buffer.clone();
+        let shared_buffer = shared_buffer.clone();
         let answer = answer.clone();
         let is_answer_found = is_answer_found.clone();
         workers.push(thread::spawn(move || {
             loop {
-                let secret = match buffer.pop() {
+                let secret = match shared_buffer.pop() {
                     Some(sec) => sec,
                     None => return
                 };
