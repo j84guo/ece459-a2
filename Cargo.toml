@@ -21,7 +21,3 @@ path = "src/message-passing.rs"
 [[bin]]
 name = "shared-mem"
 path = "src/shared-mem.rs"
-
-[[bin]]
-name = "shared-mem-arrayqueue"
-path = "src/shared-mem-arrayqueue.rs"

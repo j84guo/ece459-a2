@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use crossbeam::utils::Backoff;
+use std::thread::JoinHandle;
 
 const DEFAULT_ALPHABETS: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
 
@@ -24,11 +25,6 @@ fn is_secret_valid(msg: &[u8], sig: &[u8], secret: &[u8]) -> bool {
     let mut mac = HmacSha256::new_varkey(secret).unwrap();
     mac.update(msg);
     mac.verify(sig).is_ok()
-}
-
-enum PushOrPop {
-    Push,
-    Pop
 }
 
 #[derive(Clone)]
@@ -48,7 +44,7 @@ impl SharedBuffer {
     }
 
     fn push(&self, x: Option<Vec<u8>>) {
-        let permit = self.acquire_semaphore(PushOrPop::Push);
+        let permit = self.acquire_semaphore(&self.spaces);
         {
             let mut buffer = self.buffer.lock().unwrap();
             buffer.push_back(x);
@@ -57,25 +53,13 @@ impl SharedBuffer {
         permit.forget();
     }
 
-    fn block_on_semaphore(&self, op: PushOrPop) -> SemaphorePermit {
-        return if let PushOrPop::Pop = op {
-            block_on(self.items.acquire())
-        } else {
-            block_on(self.spaces.acquire())
-        }
-    }
-
-    fn acquire_semaphore(&self, op: PushOrPop) -> SemaphorePermit {
+    fn acquire_semaphore<'a>(&'a self, sem: &'a Semaphore) -> SemaphorePermit<'a> {
         let backoff = Backoff::new();
         loop {
             if backoff.is_completed() {
-                return self.block_on_semaphore(op);
+                return block_on(sem.acquire());
             }
-            let res = if let PushOrPop::Pop = op {
-                self.items.try_acquire()
-            } else {
-                self.spaces.try_acquire()
-            };
+            let res = sem.try_acquire();
             match res {
                 Ok(permit) => {
                     return permit;
@@ -88,7 +72,7 @@ impl SharedBuffer {
     }
 
     fn pop(&self) -> Option<Vec<u8>> {
-        let permit = self.acquire_semaphore(PushOrPop::Pop);
+        let permit = self.acquire_semaphore(&self.items);
         let x = {
             let mut buffer = self.buffer.lock().unwrap();
             buffer.pop_front().unwrap()
@@ -118,6 +102,38 @@ fn generate_secrets(alphabet: &[u8],
             }
         }
     }
+}
+
+// let num_workers = num_cpus::get();
+// let buffer_capacity = num_workers * 8;
+// let buffer = SharedBuffer::new(buffer_capacity);
+// let done_flag = Arc::new(AtomicBool::new(false));
+fn start_consumers(num_workers: usize,
+                   shared_buffer: &SharedBuffer,
+                   done_flag: &Arc<AtomicBool>,
+                   msg: &Arc<Vec<u8>>,
+                   sig: &Arc<Vec<u8>>) -> Vec<JoinHandle<()>> {
+    let mut workers = vec![];
+    for _ in 0..num_workers {
+        let msg = msg.clone();
+        let sig = sig.clone();
+        let buffer = shared_buffer.clone();
+        let done_flag = done_flag.clone();
+        workers.push(thread::spawn(move || {
+            loop {
+                let sec = match buffer.pop() {
+                    Some(sec) => sec,
+                    None => return
+                };
+                if is_secret_valid(&msg, &sig, &sec) {
+                    println!("{}", std::str::from_utf8(&sec).unwrap());
+                    done_flag.store(true, Ordering::SeqCst);
+                    return;
+                }
+            }
+        }));
+    }
+    return workers;
 }
 
 fn main() {
@@ -150,12 +166,12 @@ fn main() {
         }
     };
     // message is everything before the last dot
-    let msg = token.as_bytes()[..dot].to_vec();
+    let msg = Arc::new(token.as_bytes()[..dot].to_vec());
     // signature is everything after the last dot
     let sig = &token.as_bytes()[dot + 1..];
     // convert base64 encoding into binary
     let sig = match base64::decode_config(sig, base64::URL_SAFE_NO_PAD) {
-        Ok(sig) => sig,
+        Ok(sig) => Arc::new(sig),
         Err(_) => {
             eprintln!("Invalid signature");
             return;
@@ -164,34 +180,15 @@ fn main() {
 
     let num_workers = num_cpus::get();
     let buffer_capacity = num_workers * 8;
-    let buffer = SharedBuffer::new(buffer_capacity);
+    let shared_buffer = SharedBuffer::new(buffer_capacity);
     let done_flag = Arc::new(AtomicBool::new(false));
 
-    let mut workers = vec![];
-    for _ in 0..num_workers {
-        let msg = msg.clone();
-        let sig = sig.clone();
-        let buffer = buffer.clone();
-        let done_flag = done_flag.clone();
-        workers.push(thread::spawn(move || {
-            loop {
-                let sec = match buffer.pop() {
-                    Some(sec) => sec,
-                    None => return
-                };
-                if is_secret_valid(&msg, &sig, &sec) {
-                    println!("{}", std::str::from_utf8(&sec).unwrap());
-                    done_flag.store(true, Ordering::SeqCst);
-                    return;
-                }
-            }
-        }));
-    }
+    let workers = start_consumers(num_workers, &shared_buffer, &done_flag, &msg, &sig);
 
-    generate_secrets(&alphabet, max_len as usize, &buffer, &done_flag);
+    generate_secrets(&alphabet, max_len as usize, &shared_buffer, &done_flag);
 
     for _ in 0..num_workers {
-        buffer.push(None);
+        shared_buffer.push(None);
     }
     for w in workers {
         w.join().unwrap();

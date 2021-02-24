@@ -9,6 +9,7 @@ use sha2::Sha256;
 use std::env;
 use std::thread;
 use std::thread::JoinHandle;
+use std::sync::Arc;
 
 const DEFAULT_ALPHABETS: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
 
@@ -45,8 +46,8 @@ fn generate_secrets(alphabet: &[u8],
 }
 
 fn start_consumers(num_workers: usize,
-                   msg: &Vec<u8>,
-                   sig: &Vec<u8>,
+                   msg: &Arc<Vec<u8>>,
+                   sig: &Arc<Vec<u8>>,
                    sec_recv_end: &Receiver<Option<Vec<u8>>>,
                    res_send_end: &Sender<Vec<u8>>) -> Vec<JoinHandle<()>> {
     let mut workers = vec![];
@@ -101,12 +102,12 @@ fn main() {
         }
     };
     // message is everything before the last dot
-    let msg = token.as_bytes()[..dot].to_vec();
+    let msg = Arc::new(token.as_bytes()[..dot].to_vec());
     // signature is everything after the last dot
     let sig = &token.as_bytes()[dot + 1..];
     // convert base64 encoding into binary
     let sig = match base64::decode_config(sig, base64::URL_SAFE_NO_PAD) {
-        Ok(sig) => sig,
+        Ok(sig) => Arc::new(sig),
         Err(_) => {
             eprintln!("Invalid signature");
             return;
