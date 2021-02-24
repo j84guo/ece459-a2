@@ -86,11 +86,11 @@ impl SharedBuffer {
 fn generate_secrets(alphabet: &[u8],
                     max_len: usize,
                     buffer: &SharedBuffer,
-                    done_flag: &Arc<AtomicBool>) {
+                    found_answer: &Arc<AtomicBool>) {
     let mut frontier = vec![Vec::<u8>::new()];
     while frontier.len() > 0 {
         let sec = frontier.pop().unwrap();
-        if done_flag.load(Ordering::SeqCst) {
+        if found_answer.load(Ordering::SeqCst) {
             return;
         }
         buffer.push(Some(sec.clone()));
@@ -106,7 +106,7 @@ fn generate_secrets(alphabet: &[u8],
 
 fn start_consumers(num_workers: usize,
                    shared_buffer: &SharedBuffer,
-                   done_flag: &Arc<AtomicBool>,
+                   found_answer: &Arc<AtomicBool>,
                    msg: &Arc<Vec<u8>>,
                    sig: &Arc<Vec<u8>>) -> Vec<JoinHandle<()>> {
     let mut workers = vec![];
@@ -114,7 +114,7 @@ fn start_consumers(num_workers: usize,
         let msg = msg.clone();
         let sig = sig.clone();
         let buffer = shared_buffer.clone();
-        let done_flag = done_flag.clone();
+        let found_answer = found_answer.clone();
         workers.push(thread::spawn(move || {
             loop {
                 let sec = match buffer.pop() {
@@ -123,7 +123,7 @@ fn start_consumers(num_workers: usize,
                 };
                 if is_secret_valid(&msg, &sig, &sec) {
                     println!("{}", std::str::from_utf8(&sec).unwrap());
-                    done_flag.store(true, Ordering::SeqCst);
+                    found_answer.store(true, Ordering::SeqCst);
                     return;
                 }
             }
@@ -177,16 +177,20 @@ fn main() {
     let num_workers = num_cpus::get();
     let buffer_capacity = num_workers * 8;
     let shared_buffer = SharedBuffer::new(buffer_capacity);
-    let done_flag = Arc::new(AtomicBool::new(false));
+    let found_answer = Arc::new(AtomicBool::new(false));
 
-    let workers = start_consumers(num_workers, &shared_buffer, &done_flag, &msg, &sig);
+    let workers = start_consumers(num_workers, &shared_buffer, &found_answer, &msg, &sig);
 
-    generate_secrets(&alphabet, max_len as usize, &shared_buffer, &done_flag);
+    generate_secrets(&alphabet, max_len as usize, &shared_buffer, &found_answer);
 
     for _ in 0..num_workers {
         shared_buffer.push(None);
     }
     for w in workers {
         w.join().unwrap();
+    }
+
+    if !found_answer.load(Ordering::SeqCst) {
+        println!("No answer found");
     }
 }
