@@ -104,10 +104,6 @@ fn generate_secrets(alphabet: &[u8],
     }
 }
 
-// let num_workers = num_cpus::get();
-// let buffer_capacity = num_workers * 8;
-// let buffer = SharedBuffer::new(buffer_capacity);
-// let done_flag = Arc::new(AtomicBool::new(false));
 fn start_consumers(num_workers: usize,
                    shared_buffer: &SharedBuffer,
                    done_flag: &Arc<AtomicBool>,
