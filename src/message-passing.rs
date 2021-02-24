@@ -28,19 +28,22 @@ fn generate_secrets(alphabet: &[u8],
                     max_len: usize,
                     sec_send_end: &Sender<Option<Vec<Vec<u8>>>>,
                     res_recv_end: &Receiver<Vec<u8>>) {
-    let mut frontier = vec![Vec::<u8>::new()];
-    let mut batch = Vec::<Vec<u8>>::new();
     const BATCH_SIZE: usize = 1 << 5;
+    let mut batch = Vec::<Vec<u8>>::new();
+
+    let mut frontier = vec![Vec::<u8>::new()];
     while frontier.len() > 0 {
-        let secret = frontier.pop().unwrap();
         if !res_recv_end.is_empty() {
             return;
         }
+
+        let secret = frontier.pop().unwrap();
         batch.push(secret.clone());
         if batch.len() == BATCH_SIZE {
             sec_send_end.send(Some(batch)).unwrap();
             batch = Vec::<Vec<u8>>::new();
         }
+
         if secret.len() < max_len {
             for c in alphabet {
                 let mut next_sec = secret.clone();
@@ -49,6 +52,7 @@ fn generate_secrets(alphabet: &[u8],
             }
         }
     }
+
     if batch.len() > 0 {
         sec_send_end.send(Some(batch)).unwrap();
     }

@@ -77,10 +77,10 @@ fn generate_secrets(alphabet: &[u8],
     let mut batch = Vec::<Vec<u8>>::new();
     const BATCH_SIZE: usize = 1 << 5;
     while frontier.len() > 0 {
-        let secret = frontier.pop().unwrap();
         if is_answer_found.load(Ordering::SeqCst) {
             return;
         }
+        let secret = frontier.pop().unwrap();
         batch.push(secret.clone());
         if batch.len() == BATCH_SIZE {
             shared_buffer.push(Some(batch));
