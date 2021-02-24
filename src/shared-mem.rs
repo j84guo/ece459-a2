@@ -13,7 +13,6 @@ use std::thread;
 use std::sync::{Arc, Mutex};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
-use crossbeam::utils::Backoff;
 use std::thread::JoinHandle;
 use std::ops::Deref;
 
@@ -30,7 +29,7 @@ fn is_secret_valid(message: &[u8], signature: &[u8], secret: &[u8]) -> bool {
 
 #[derive(Clone)]
 struct SharedBuffer {
-    buffer: Arc<Mutex<VecDeque<Option<Vec<u8>>>>>,
+    buffer: Arc<Mutex<VecDeque<Option<Vec<Vec<u8>>>>>>,
     items: Arc<Semaphore>,
     spaces: Arc<Semaphore>
 }
@@ -38,13 +37,13 @@ struct SharedBuffer {
 impl SharedBuffer {
     fn new(capacity: usize) -> SharedBuffer {
         return SharedBuffer {
-            buffer: Arc::new(Mutex::new(VecDeque::<Option<Vec<u8>>>::with_capacity(capacity))),
+            buffer: Arc::new(Mutex::new(VecDeque::<Option<Vec<Vec<u8>>>>::with_capacity(capacity))),
             items: Arc::new(Semaphore::new(0)),
             spaces: Arc::new(Semaphore::new(capacity))
         };
     }
 
-    fn push(&self, x: Option<Vec<u8>>) {
+    fn push(&self, x: Option<Vec<Vec<u8>>>) {
         let permit = self.acquire_semaphore(&self.spaces);
         {
             let mut buffer = self.buffer.lock().unwrap();
@@ -55,21 +54,10 @@ impl SharedBuffer {
     }
 
     fn acquire_semaphore<'a>(&'a self, sem: &'a Semaphore) -> SemaphorePermit<'a> {
-        // return block_on(sem.acquire());
-        let backoff = Backoff::new();
-        loop {
-            if backoff.is_completed() {
-                return block_on(sem.acquire());
-            }
-            let res = sem.try_acquire();
-            match res {
-                Ok(permit) => return permit,
-                Err(_) => backoff.spin()
-            }
-        }
+        return block_on(sem.acquire());
     }
 
-    fn pop(&self) -> Option<Vec<u8>> {
+    fn pop(&self) -> Option<Vec<Vec<u8>>> {
         let permit = self.acquire_semaphore(&self.items);
         let x = {
             let mut buffer = self.buffer.lock().unwrap();
@@ -86,12 +74,18 @@ fn generate_secrets(alphabet: &[u8],
                     shared_buffer: &SharedBuffer,
                     is_answer_found: &Arc<AtomicBool>) {
     let mut frontier = vec![Vec::<u8>::new()];
+    let mut batch = Vec::<Vec<u8>>::new();
+    const BATCH_SIZE: usize = 1 << 5;
     while frontier.len() > 0 {
         let secret = frontier.pop().unwrap();
         if is_answer_found.load(Ordering::SeqCst) {
             return;
         }
-        shared_buffer.push(Some(secret.clone()));
+        batch.push(secret.clone());
+        if batch.len() == BATCH_SIZE {
+            shared_buffer.push(Some(batch));
+            batch = Vec::<Vec<u8>>::new();
+        }
         if secret.len() < max_len {
             for c in alphabet {
                 let mut next_sec = secret.clone();
@@ -99,6 +93,9 @@ fn generate_secrets(alphabet: &[u8],
                 frontier.push(next_sec);
             }
         }
+    }
+    if batch.len() > 0 {
+        shared_buffer.push(Some(batch));
     }
 }
 
@@ -117,17 +114,19 @@ fn start_consumers(num_workers: usize,
         let is_answer_found = is_answer_found.clone();
         workers.push(thread::spawn(move || {
             loop {
-                let secret = match shared_buffer.pop() {
-                    Some(sec) => sec,
+                let batch = match shared_buffer.pop() {
+                    Some(batch) => batch,
                     None => return
                 };
-                if is_secret_valid(&message, &signature, &secret) {
-                    let s = std::str::from_utf8(&secret).unwrap().to_string();
-                    {
-                        *answer.lock().unwrap() = Some(s);
+                for secret in batch {
+                    if is_secret_valid(&message, &signature, &secret) {
+                        let s = std::str::from_utf8(&secret).unwrap().to_string();
+                        {
+                            *answer.lock().unwrap() = Some(s);
+                        }
+                        is_answer_found.store(true, Ordering::SeqCst);
+                        return;
                     }
-                    is_answer_found.store(true, Ordering::SeqCst);
-                    return;
                 }
             }
         }));

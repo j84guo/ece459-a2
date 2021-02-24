@@ -26,29 +26,38 @@ fn is_secret_valid(message: &[u8],
 
 fn generate_secrets(alphabet: &[u8],
                     max_len: usize,
-                    sec_send_end: &Sender<Option<Vec<u8>>>,
+                    sec_send_end: &Sender<Option<Vec<Vec<u8>>>>,
                     res_recv_end: &Receiver<Vec<u8>>) {
     let mut frontier = vec![Vec::<u8>::new()];
+    let mut batch = Vec::<Vec<u8>>::new();
+    const BATCH_SIZE: usize = 1 << 5;
     while frontier.len() > 0 {
-        let sec = frontier.pop().unwrap();
+        let secret = frontier.pop().unwrap();
         if !res_recv_end.is_empty() {
             return;
         }
-        sec_send_end.send(Some(sec.clone())).unwrap();
-        if sec.len() < max_len {
+        batch.push(secret.clone());
+        if batch.len() == BATCH_SIZE {
+            sec_send_end.send(Some(batch)).unwrap();
+            batch = Vec::<Vec<u8>>::new();
+        }
+        if secret.len() < max_len {
             for c in alphabet {
-                let mut next_sec = sec.clone();
+                let mut next_sec = secret.clone();
                 next_sec.push(*c);
                 frontier.push(next_sec);
             }
         }
+    }
+    if batch.len() > 0 {
+        sec_send_end.send(Some(batch)).unwrap();
     }
 }
 
 fn start_consumers(num_workers: usize,
                    message: &Arc<Vec<u8>>,
                    signature: &Arc<Vec<u8>>,
-                   sec_recv_end: &Receiver<Option<Vec<u8>>>,
+                   sec_recv_end: &Receiver<Option<Vec<Vec<u8>>>>,
                    res_send_end: &Sender<Vec<u8>>) -> Vec<JoinHandle<()>> {
     let mut workers = vec![];
     for _ in 0..num_workers {
@@ -58,13 +67,15 @@ fn start_consumers(num_workers: usize,
         let res_send_end = res_send_end.clone();
         workers.push(thread::spawn(move || {
             loop {
-                let sec = match sec_recv_end.recv().unwrap() {
-                    Some(sec) => sec,
+                let batch = match sec_recv_end.recv().unwrap() {
+                    Some(batch) => batch,
                     None => return
                 };
-                if is_secret_valid(&message, &signature, &sec) {
-                    res_send_end.try_send(sec).unwrap();
-                    return;
+                for secret in batch {
+                    if is_secret_valid(&message, &signature, &secret) {
+                        res_send_end.try_send(secret).unwrap();
+                        return;
+                    }
                 }
             }
         }));
@@ -119,7 +130,7 @@ fn main() {
     // Let buffer capacity be a multiple of number of workers
     let buffer_capacity = num_workers * 4;
     // Channel for sending secrets from the main thread to workers
-    let (sec_send_end, sec_recv_end) = bounded::<Option<Vec<u8>>>(buffer_capacity);
+    let (sec_send_end, sec_recv_end) = bounded::<Option<Vec<Vec<u8>>>>(buffer_capacity);
     // Channel for a worker to signal that it has found the answer
     let (res_send_end, res_recv_end) = bounded::<Vec<u8>>(1usize);
 
@@ -140,7 +151,7 @@ fn main() {
     if res_recv_end.is_empty() {
         println!("No answer found");
     } else {
-        let ans = res_recv_end.recv().unwrap();
-        println!("{}", std::str::from_utf8(&ans).unwrap());
+        let answer = res_recv_end.recv().unwrap();
+        println!("{}", std::str::from_utf8(&answer).unwrap());
     }
 }
