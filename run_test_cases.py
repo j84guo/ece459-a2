@@ -21,7 +21,7 @@ if __name__ == '__main__':
     for bin in [
         # 'lab2',
         'shared-mem',
-        # 'message-passing'
+        'message-passing'
     ]:
         print('testing binary {}'.format(bin))
         for (token, secret) in test_cases:

@@ -16,12 +16,12 @@ const DEFAULT_ALPHABETS: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
 type HmacSha256 = Hmac<Sha256>;
 
 // Check if a JWT secret is correct
-fn is_secret_valid(msg: &[u8],
-                   sig: &[u8],
+fn is_secret_valid(message: &[u8],
+                   signature: &[u8],
                    secret: &[u8]) -> bool {
     let mut mac = HmacSha256::new_varkey(secret).unwrap();
-    mac.update(msg);
-    mac.verify(sig).is_ok()
+    mac.update(message);
+    mac.verify(signature).is_ok()
 }
 
 fn generate_secrets(alphabet: &[u8],
@@ -46,14 +46,14 @@ fn generate_secrets(alphabet: &[u8],
 }
 
 fn start_consumers(num_workers: usize,
-                   msg: &Arc<Vec<u8>>,
-                   sig: &Arc<Vec<u8>>,
+                   message: &Arc<Vec<u8>>,
+                   signature: &Arc<Vec<u8>>,
                    sec_recv_end: &Receiver<Option<Vec<u8>>>,
                    res_send_end: &Sender<Vec<u8>>) -> Vec<JoinHandle<()>> {
     let mut workers = vec![];
     for _ in 0..num_workers {
-        let msg = msg.clone();
-        let sig = sig.clone();
+        let message = message.clone();
+        let signature = signature.clone();
         let sec_recv_end = sec_recv_end.clone();
         let res_send_end = res_send_end.clone();
         workers.push(thread::spawn(move || {
@@ -62,7 +62,7 @@ fn start_consumers(num_workers: usize,
                     Some(sec) => sec,
                     None => return
                 };
-                if is_secret_valid(&msg, &sig, &sec) {
+                if is_secret_valid(&message, &signature, &sec) {
                     res_send_end.try_send(sec).unwrap();
                     return;
                 }
@@ -102,14 +102,14 @@ fn main() {
         }
     };
     // message is everything before the last dot
-    let msg = Arc::new(token.as_bytes()[..dot].to_vec());
-    // signature is everything after the last dot
-    let sig = &token.as_bytes()[dot + 1..];
+    let message = Arc::new(token.as_bytes()[..dot].to_vec());
+    // signaturenature is everything after the last dot
+    let signature = &token.as_bytes()[dot + 1..];
     // convert base64 encoding into binary
-    let sig = match base64::decode_config(sig, base64::URL_SAFE_NO_PAD) {
-        Ok(sig) => Arc::new(sig),
+    let signature = match base64::decode_config(signature, base64::URL_SAFE_NO_PAD) {
+        Ok(signature) => Arc::new(signature),
         Err(_) => {
-            eprintln!("Invalid signature");
+            eprintln!("Invalid signaturenature");
             return;
         }
     };
@@ -124,7 +124,7 @@ fn main() {
     let (res_send_end, res_recv_end) = bounded::<Vec<u8>>(1usize);
 
     // Start workers
-    let workers = start_consumers(num_workers, &msg, &sig, &sec_recv_end, &res_send_end);
+    let workers = start_consumers(num_workers, &message, &signature, &sec_recv_end, &res_send_end);
     // Generate secrets until all secrets are sent or a worker indicates it has found the answer
     generate_secrets(&alphabet, max_len as usize, &sec_send_end, &res_recv_end);
 

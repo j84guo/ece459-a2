@@ -15,16 +15,17 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use crossbeam::utils::Backoff;
 use std::thread::JoinHandle;
+use std::ops::Deref;
 
 const DEFAULT_ALPHABETS: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
 
 type HmacSha256 = Hmac<Sha256>;
 
 // Check if a JWT secret is correct
-fn is_secret_valid(msg: &[u8], sig: &[u8], secret: &[u8]) -> bool {
+fn is_secret_valid(message: &[u8], signature: &[u8], secret: &[u8]) -> bool {
     let mut mac = HmacSha256::new_varkey(secret).unwrap();
-    mac.update(msg);
-    mac.verify(sig).is_ok()
+    mac.update(message);
+    mac.verify(signature).is_ok()
 }
 
 #[derive(Clone)]
@@ -54,6 +55,7 @@ impl SharedBuffer {
     }
 
     fn acquire_semaphore<'a>(&'a self, sem: &'a Semaphore) -> SemaphorePermit<'a> {
+        // return block_on(sem.acquire());
         let backoff = Backoff::new();
         loop {
             if backoff.is_completed() {
@@ -85,14 +87,14 @@ fn generate_secrets(alphabet: &[u8],
                     is_answer_found: &Arc<AtomicBool>) {
     let mut frontier = vec![Vec::<u8>::new()];
     while frontier.len() > 0 {
-        let sec = frontier.pop().unwrap();
+        let secret = frontier.pop().unwrap();
         if is_answer_found.load(Ordering::SeqCst) {
             return;
         }
-        buffer.push(Some(sec.clone()));
-        if sec.len() < max_len {
+        buffer.push(Some(secret.clone()));
+        if secret.len() < max_len {
             for c in alphabet {
-                let mut next_sec = sec.clone();
+                let mut next_sec = secret.clone();
                 next_sec.push(*c);
                 frontier.push(next_sec);
             }
@@ -103,22 +105,27 @@ fn generate_secrets(alphabet: &[u8],
 fn start_consumers(num_workers: usize,
                    shared_buffer: &SharedBuffer,
                    is_answer_found: &Arc<AtomicBool>,
-                   msg: &Arc<Vec<u8>>,
-                   sig: &Arc<Vec<u8>>) -> Vec<JoinHandle<()>> {
+                   answer: &Arc<Mutex<Option<String>>>,
+                   message: &Arc<Vec<u8>>,
+                   signature: &Arc<Vec<u8>>) -> Vec<JoinHandle<()>> {
     let mut workers = vec![];
     for _ in 0..num_workers {
-        let msg = msg.clone();
-        let sig = sig.clone();
+        let message = message.clone();
+        let signature = signature.clone();
         let buffer = shared_buffer.clone();
+        let answer = answer.clone();
         let is_answer_found = is_answer_found.clone();
         workers.push(thread::spawn(move || {
             loop {
-                let sec = match buffer.pop() {
+                let secret = match buffer.pop() {
                     Some(sec) => sec,
                     None => return
                 };
-                if is_secret_valid(&msg, &sig, &sec) {
-                    println!("{}", std::str::from_utf8(&sec).unwrap());
+                if is_secret_valid(&message, &signature, &secret) {
+                    let s = std::str::from_utf8(&secret).unwrap().to_string();
+                    {
+                        *answer.lock().unwrap() = Some(s);
+                    }
                     is_answer_found.store(true, Ordering::SeqCst);
                     return;
                 }
@@ -158,14 +165,14 @@ fn main() {
         }
     };
     // message is everything before the last dot
-    let msg = Arc::new(token.as_bytes()[..dot].to_vec());
-    // signature is everything after the last dot
-    let sig = &token.as_bytes()[dot + 1..];
+    let message = Arc::new(token.as_bytes()[..dot].to_vec());
+    // signaturenature is everything after the last dot
+    let signature = &token.as_bytes()[dot + 1..];
     // convert base64 encoding into binary
-    let sig = match base64::decode_config(sig, base64::URL_SAFE_NO_PAD) {
-        Ok(sig) => Arc::new(sig),
+    let signature = match base64::decode_config(signature, base64::URL_SAFE_NO_PAD) {
+        Ok(signature) => Arc::new(signature),
         Err(_) => {
-            eprintln!("Invalid signature");
+            eprintln!("Invalid signaturenature");
             return;
         }
     };
@@ -174,9 +181,9 @@ fn main() {
     let buffer_capacity = num_workers * 8;
     let shared_buffer = SharedBuffer::new(buffer_capacity);
     let is_answer_found = Arc::new(AtomicBool::new(false));
+    let answer = Arc::new(Mutex::<Option<String>>::new(None));
 
-    let workers = start_consumers(num_workers, &shared_buffer, &is_answer_found, &msg, &sig);
-
+    let workers = start_consumers(num_workers, &shared_buffer, &is_answer_found, &answer, &message, &signature);
     generate_secrets(&alphabet, max_len as usize, &shared_buffer, &is_answer_found);
 
     for _ in 0..num_workers {
@@ -186,7 +193,10 @@ fn main() {
         w.join().unwrap();
     }
 
-    if !is_answer_found.load(Ordering::SeqCst) {
-        println!("No answer found");
+    {
+        match answer.lock().unwrap().deref() {
+            Some(answer) => println!("{}", answer),
+            None => println!("No answer found")
+        };
     }
 }
