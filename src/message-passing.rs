@@ -23,23 +23,24 @@ fn is_secret_valid(msg: &[u8],
     mac.verify(sig).is_ok()
 }
 
-fn generate_secrets(sec: Vec<u8>,
-                    alphabet: &[u8],
+fn generate_secrets(alphabet: &[u8],
                     max_len: usize,
                     sec_send_end: &Sender<Option<Vec<u8>>>,
                     res_recv_end: &Receiver<Vec<u8>>) {
-    if !res_recv_end.is_empty() {
-        return;
-    }
-    sec_send_end.send(Some(sec.clone())).unwrap();
-    if sec.len() == max_len {
-        return;
-    }
-    for &c in alphabet {
-        let mut next_sec: Vec<u8> = Vec::with_capacity(sec.len() + 1);
-        next_sec.extend(sec.iter());
-        next_sec.push(c);
-        generate_secrets(next_sec, alphabet, max_len, sec_send_end, res_recv_end);
+    let mut frontier = vec![Vec::<u8>::new()];
+    while frontier.len() > 0 {
+        let sec = frontier.pop().unwrap();
+        if !res_recv_end.is_empty() {
+            return;
+        }
+        sec_send_end.send(Some(sec.clone())).unwrap();
+        if sec.len() < max_len {
+            for c in alphabet {
+                let mut next_sec = sec.clone();
+                next_sec.push(*c);
+                frontier.push(next_sec);
+            }
+        }
     }
 }
 
@@ -124,7 +125,7 @@ fn main() {
     // Start workers
     let workers = start_consumers(num_workers, &msg, &sig, &sec_recv_end, &res_send_end);
     // Generate secrets until all secrets are sent or a worker indicates it has found the answer
-    generate_secrets(Vec::<u8>::new(), &alphabet, max_len as usize, &sec_send_end, &res_recv_end);
+    generate_secrets(&alphabet, max_len as usize, &sec_send_end, &res_recv_end);
 
     // Either way, tell all workers to stop
     for _ in 0..num_workers {

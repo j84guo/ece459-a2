@@ -6,13 +6,14 @@
 use futures::executor::block_on;
 use hmac::{Hmac, Mac, NewMac};
 use sha2::Sha256;
-use tokio::sync::Semaphore;
+use tokio::sync::{Semaphore, SemaphorePermit};
 use std::env;
 use std::clone::Clone;
 use std::thread;
 use std::sync::{Arc, Mutex};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
+use crossbeam::utils::Backoff;
 
 const DEFAULT_ALPHABETS: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
 
@@ -23,6 +24,11 @@ fn is_secret_valid(msg: &[u8], sig: &[u8], secret: &[u8]) -> bool {
     let mut mac = HmacSha256::new_varkey(secret).unwrap();
     mac.update(msg);
     mac.verify(sig).is_ok()
+}
+
+enum PushOrPop {
+    Push,
+    Pop
 }
 
 #[derive(Clone)]
@@ -42,7 +48,7 @@ impl SharedBuffer {
     }
 
     fn push(&self, x: Option<Vec<u8>>) {
-        let permit = block_on(self.spaces.acquire());
+        let permit = self.acquire_semaphore(PushOrPop::Push);
         {
             let mut buffer = self.buffer.lock().unwrap();
             buffer.push_back(x);
@@ -51,8 +57,38 @@ impl SharedBuffer {
         permit.forget();
     }
 
+    fn block_on_semaphore(&self, op: PushOrPop) -> SemaphorePermit {
+        return if let PushOrPop::Pop = op {
+            block_on(self.items.acquire())
+        } else {
+            block_on(self.spaces.acquire())
+        }
+    }
+
+    fn acquire_semaphore(&self, op: PushOrPop) -> SemaphorePermit {
+        let backoff = Backoff::new();
+        loop {
+            if backoff.is_completed() {
+                return self.block_on_semaphore(op);
+            }
+            let res = if let PushOrPop::Pop = op {
+                self.items.try_acquire()
+            } else {
+                self.spaces.try_acquire()
+            };
+            match res {
+                Ok(permit) => {
+                    return permit;
+                },
+                Err(_) => {
+                    backoff.spin();
+                }
+            }
+        }
+    }
+
     fn pop(&self) -> Option<Vec<u8>> {
-        let permit = block_on(self.items.acquire());
+        let permit = self.acquire_semaphore(PushOrPop::Pop);
         let x = {
             let mut buffer = self.buffer.lock().unwrap();
             buffer.pop_front().unwrap()
@@ -63,23 +99,24 @@ impl SharedBuffer {
     }
 }
 
-fn generate_secrets(sec: Vec<u8>,
-                    alphabet: &[u8],
+fn generate_secrets(alphabet: &[u8],
                     max_len: usize,
                     buffer: &SharedBuffer,
                     done_flag: &Arc<AtomicBool>) {
-    if done_flag.load(Ordering::SeqCst) {
-        return;
-    }
-    buffer.push(Some(sec.clone()));
-    if sec.len() == max_len {
-        return;
-    }
-    for &c in alphabet {
-        let mut next_sec: Vec<u8> = Vec::with_capacity(sec.len() + 1);
-        next_sec.extend(sec.iter());
-        next_sec.push(c);
-        generate_secrets(next_sec, alphabet, max_len, buffer, done_flag);
+    let mut frontier = vec![Vec::<u8>::new()];
+    while frontier.len() > 0 {
+        let sec = frontier.pop().unwrap();
+        if done_flag.load(Ordering::SeqCst) {
+            return;
+        }
+        buffer.push(Some(sec.clone()));
+        if sec.len() < max_len {
+            for c in alphabet {
+                let mut next_sec = sec.clone();
+                next_sec.push(*c);
+                frontier.push(next_sec);
+            }
+        }
     }
 }
 
@@ -151,7 +188,7 @@ fn main() {
         }));
     }
 
-    generate_secrets(Vec::<u8>::new(), &alphabet, max_len as usize, &buffer, &done_flag);
+    generate_secrets(&alphabet, max_len as usize, &buffer, &done_flag);
 
     for _ in 0..num_workers {
         buffer.push(None);

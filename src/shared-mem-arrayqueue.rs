@@ -57,23 +57,24 @@ impl SharedBuffer {
     }
 }
 
-fn generate_secrets(sec: Vec<u8>,
-                    alphabet: &[u8],
+fn generate_secrets(alphabet: &[u8],
                     max_len: usize,
                     buffer: &SharedBuffer,
                     done_flag: &Arc<AtomicBool>) {
-    if done_flag.load(Ordering::SeqCst) {
-        return;
-    }
-    buffer.push(Some(sec.clone()));
-    if sec.len() == max_len {
-        return;
-    }
-    for &c in alphabet {
-        let mut next_sec: Vec<u8> = Vec::with_capacity(sec.len() + 1);
-        next_sec.extend(sec.iter());
-        next_sec.push(c);
-        generate_secrets(next_sec, alphabet, max_len, buffer, done_flag);
+    let mut frontier = vec![Vec::<u8>::new()];
+    while frontier.len() > 0 {
+        let sec = frontier.pop().unwrap();
+        if done_flag.load(Ordering::SeqCst) {
+            return;
+        }
+        buffer.push(Some(sec.clone()));
+        if sec.len() < max_len {
+            for c in alphabet {
+                let mut next_sec = sec.clone();
+                next_sec.push(*c);
+                frontier.push(next_sec);
+            }
+        }
     }
 }
 
@@ -134,10 +135,7 @@ fn main() {
             loop {
                 let sec = match buffer.pop() {
                     Some(sec) => sec,
-                    None => {
-                        println!("[{}] Ending", thread_id::get());
-                        return;
-                    }
+                    None => return
                 };
                 if is_secret_valid(&msg, &sig, &sec) {
                     println!("{}", std::str::from_utf8(&sec).unwrap());
@@ -148,7 +146,7 @@ fn main() {
         }));
     }
 
-    generate_secrets(Vec::<u8>::new(), &alphabet, max_len as usize, &buffer, &done_flag);
+    generate_secrets(&alphabet, max_len as usize, &buffer, &done_flag);
 
     for _ in 0..num_workers {
         buffer.push(None);
