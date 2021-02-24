@@ -12,6 +12,7 @@ hmac = "0.8.1"
 num_cpus = "1.13.0"
 sha2 = "0.9.1"
 tokio = { version = "0.2.22", features = ["sync"] }
+thread-id = "3.3.0"
 
 [[bin]]
 name = "message-passing"
@@ -20,3 +21,7 @@ path = "src/message-passing.rs"
 [[bin]]
 name = "shared-mem"
 path = "src/shared-mem.rs"
+
+[[bin]]
+name = "shared-mem-arrayqueue"
+path = "src/shared-mem-arrayqueue.rs"
